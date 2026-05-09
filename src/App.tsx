@@ -129,9 +129,7 @@ export default function App() {
           }}
         >
           <div style={{ maxWidth: 700, margin: '0 auto' }}>
-            <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'center' }}>
-              <img src="/logo.svg" alt="" width={32} height={32} />
-            </div>
+            <div style={{ marginBottom: 8 }} />
             <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginBottom: 6 }}>
               Real-time epidemic intelligence powered by AI
             </div>

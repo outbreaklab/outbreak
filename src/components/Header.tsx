@@ -13,8 +13,7 @@ export default function Header() {
         borderBottom: '1px solid rgba(245, 245, 240, 0.06)',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <img src="/logo.svg" alt="" width={28} height={28} style={{ display: 'block' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <LiveBadge text="LIVE" />
       </div>
 
