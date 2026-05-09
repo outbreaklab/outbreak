@@ -13,8 +13,8 @@ export default function NewsTab() {
   const sectionRef = useRef<HTMLDivElement>(null);
 
   const articles = useMemo(() => {
-    const newsArticles = (newsQuery.data?.articles || FALLBACK_DATA.news).map((a: any) => ({ ...a, _source: 'newsapi' as const }));
-    const gdeltArticles = (gdeltQuery.data?.articles || []).map((a: any) => ({
+    const newsArticles = (newsQuery.data?.articles?.length ? newsQuery.data.articles : FALLBACK_DATA.news).map((a: any) => ({ ...a, _source: 'newsapi' as const }));
+    const gdeltArticles = (gdeltQuery.data?.articles?.length ? gdeltQuery.data.articles : []).map((a: any) => ({
       ...a,
       _source: 'gdelt' as const,
       source: a.source || 'GDELT',
@@ -25,7 +25,7 @@ export default function NewsTab() {
     const seen = new Set<string>();
     const merged = [...newsArticles, ...gdeltArticles].filter((a: any) => {
       const url = a.url || a.link || '';
-      if (seen.has(url)) return false;
+      if (!url || seen.has(url)) return false;
       seen.add(url);
       return true;
     });

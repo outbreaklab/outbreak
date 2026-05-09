@@ -20,7 +20,9 @@ export default function DashboardTab() {
   const [aiLoading, setAiLoading] = useState(false);
   const sectionRef = useRef<HTMLDivElement>(null);
 
-  const articles = (newsQuery.data?.articles || gdeltQuery.data?.articles || FALLBACK_DATA.news).slice(0, 6);
+  const newsArt = newsQuery.data?.articles;
+  const gdeltArt = gdeltQuery.data?.articles;
+  const articles = (newsArt?.length ? newsArt : gdeltArt?.length ? gdeltArt : FALLBACK_DATA.news).slice(0, 6);
 
   const runAI = async () => {
     setAiLoading(true);
