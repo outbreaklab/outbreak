@@ -13,10 +13,8 @@ export default function Header() {
         borderBottom: '1px solid rgba(245, 245, 240, 0.06)',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span className="font-display" style={{ fontSize: 18, fontWeight: 500, letterSpacing: '0.08em', color: 'var(--text-primary)' }}>
-          Outbreak
-        </span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <img src="/logo.svg" alt="" width={28} height={28} style={{ display: 'block' }} />
         <LiveBadge text="LIVE" />
       </div>
 
