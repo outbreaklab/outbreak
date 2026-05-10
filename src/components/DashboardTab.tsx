@@ -1,28 +1,84 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { trpc } from '@/providers/trpc';
 import LiquidGlass from '@/components/LiquidGlass';
 import StatCounter from '@/components/StatCounter';
-import { FALLBACK_DATA, daysSince, getSeverityColor } from '@/data/outbreakData';
+import { FALLBACK_DATA, daysSince } from '@/data/outbreakData';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 
 gsap.registerPlugin(ScrollTrigger);
 
-const METRICS = FALLBACK_DATA.metrics;
-const DAY_COUNT = daysSince(FALLBACK_DATA.indexDate);
-
 export default function DashboardTab() {
-  const newsQuery = trpc.news.fetchLatest.useQuery();
-  const gdeltQuery = trpc.gdelt.fetchOutbreaks.useQuery();
+  const newsQuery = trpc.news.fetchLatest.useQuery(undefined, { refetchInterval: 5 * 60 * 1000 });
+  const gdeltQuery = trpc.gdelt.fetchOutbreaks.useQuery(undefined, { refetchInterval: 5 * 60 * 1000 });
+  const shipQuery = trpc.ship.getCurrent.useQuery(undefined, { refetchInterval: 2 * 60 * 1000 });
+  const globalQuery = trpc.outbreak.getGlobal.useQuery(undefined, { refetchInterval: 10 * 60 * 1000 });
+  // Latest DB record from Claude AI extraction (refreshes every 30 min)
+  const latestCaseQuery = trpc.outbreak.getLatest.useQuery(undefined, { refetchInterval: 30 * 60 * 1000 });
   const aiQuery = trpc.ai.analyze.useMutation();
 
   const [aiAnalysis, setAiAnalysis] = useState<any>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const sectionRef = useRef<HTMLDivElement>(null);
 
-  const newsArt = newsQuery.data?.articles;
-  const gdeltArt = gdeltQuery.data?.articles;
-  const articles = (newsArt?.length ? newsArt : gdeltArt?.length ? gdeltArt : FALLBACK_DATA.news).slice(0, 6);
+  const ship = shipQuery.data;
+  // Live DB data from Claude AI extraction overlays the static fallback
+  const liveCase = latestCaseQuery.data as any;
+  const FALLBACK = FALLBACK_DATA.metrics;
+  const METRICS = {
+    casesTotal: liveCase ? (liveCase.casesConfirmed ?? 0) + (liveCase.casesSuspected ?? 0) : FALLBACK.casesTotal,
+    casesConfirmed: liveCase?.casesConfirmed ?? FALLBACK.casesConfirmed,
+    casesSuspected: liveCase?.casesSuspected ?? FALLBACK.casesSuspected,
+    deaths: liveCase?.deaths ?? FALLBACK.deaths,
+    cfrPct: liveCase?.cfr ?? FALLBACK.cfrPct,
+    symptomaticNow: ship?.symptomatic ?? FALLBACK.symptomaticNow,
+    evacuated: ship?.evacuated ?? FALLBACK.evacuated,
+    inIcu: ship?.inIcu ?? FALLBACK.inIcu,
+    nationalities: FALLBACK.nationalities,
+    peopleOnboard: ship?.peopleOnboard ?? FALLBACK.peopleOnboard,
+    shipStatus: ship?.status ?? FALLBACK.shipStatus,
+    strain: FALLBACK.strain,
+  };
+  const isLiveData = liveCase != null;
+  const DAY_COUNT = daysSince(FALLBACK_DATA.indexDate);
+
+  // Ship data rows — prefer live query, fall back to static
+  const shipData = useMemo(() => [
+    { label: 'Vessel', value: ship?.vesselName || 'MV Hondius' },
+    { label: 'Operator', value: (ship as any)?.operator || 'Oceanwide Expeditions' },
+    { label: 'Ship status', value: ship?.status || METRICS.shipStatus, color: '#38bdf8' },
+    { label: 'People onboard', value: ship?.peopleOnboard != null ? `~${ship.peopleOnboard}` : `~${METRICS.peopleOnboard}` },
+    { label: 'Symptomatic now', value: String(ship?.symptomatic ?? METRICS.symptomaticNow), color: '#34d399' },
+    { label: 'PCR confirmed', value: String(METRICS.casesConfirmed), color: '#ff9f1c' },
+    { label: 'Suspected', value: String(METRICS.casesSuspected) },
+    { label: 'Evacuated', value: String(ship?.evacuated ?? METRICS.evacuated), color: '#38bdf8' },
+    { label: 'In ICU', value: String(ship?.inIcu ?? METRICS.inIcu), color: '#e63946' },
+    { label: 'Strain', value: METRICS.strain, color: '#ff9f1c' },
+    { label: 'Nationalities', value: String(METRICS.nationalities) },
+    { label: 'Incubation', value: '7-39 days' },
+  ], [ship, METRICS]);
+
+  // Merge news sources; dedupe by URL
+  const articles = useMemo(() => {
+    const newsArt = newsQuery.data?.articles ?? [];
+    const gdeltArt = (gdeltQuery.data?.articles ?? []).map((a: any) => ({
+      ...a, source: { name: a.source || 'GDELT' }, publishedAt: a.date, severity: 'medium',
+    }));
+    const all = newsArt.length || gdeltArt.length
+      ? [...newsArt, ...gdeltArt]
+      : FALLBACK_DATA.news;
+    const seen = new Set<string>();
+    return all.filter((a: any) => {
+      const key = (a.url || a.link || a.title || '').trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 6);
+  }, [newsQuery.data, gdeltQuery.data]);
+
+  // WHO DON real alerts from getGlobal
+  const whoAlerts = globalQuery.data?.whoAlerts ?? [];
+  const whoAvailable = globalQuery.data?.whoAvailable ?? false;
 
   const runAI = async () => {
     setAiLoading(true);
@@ -57,6 +113,15 @@ export default function DashboardTab() {
 
   return (
     <div ref={sectionRef} style={{ maxWidth: 1100, margin: '0 auto', padding: '0 24px' }}>
+      {/* Live data badge */}
+      {isLiveData && (
+        <div className="font-data animate-card" style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, fontSize: '0.5rem', color: '#34d399' }}>
+          <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#34d399', animation: 'pulse 1.5s infinite' }} />
+          LIVE — data extracted by Claude AI from WHO DON &amp; ProMED ·{' '}
+          {liveCase?.updatedAt ? new Date(liveCase.updatedAt).toLocaleTimeString() : ''}
+        </div>
+      )}
+
       {/* 4 Stat Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
         {[
@@ -86,8 +151,10 @@ export default function DashboardTab() {
         <span className="font-data" style={{ fontSize: '0.55rem', color: 'var(--text-dim)' }}>{FALLBACK_DATA.riskAssessment.detail}</span>
         <span style={{ color: 'rgba(245,245,240,0.15)' }}>|</span>
         <span className="font-data" style={{ fontSize: '0.55rem', color: 'rgba(143,163,175,0.5)', display: 'flex', alignItems: 'center', gap: 6 }}>
-          {(newsQuery.isFetching || gdeltQuery.isFetching) && <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-amber)', animation: 'pulse 1.5s infinite' }} />}
-          {newsQuery.isFetching ? 'Syncing...' : FALLBACK_DATA.riskAssessment.syncNote}
+          {(newsQuery.isFetching || gdeltQuery.isFetching || globalQuery.isFetching) && (
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-amber)', animation: 'pulse 1.5s infinite' }} />
+          )}
+          {globalQuery.isFetching ? 'Syncing WHO...' : whoAvailable ? `WHO DON live · synced ${new Date(globalQuery.data?.lastUpdated ?? '').toLocaleTimeString()}` : 'Auto-syncs every 10 min'}
         </span>
       </LiquidGlass>
 
@@ -108,9 +175,12 @@ export default function DashboardTab() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
         {/* SHIP & CASE DATA */}
         <LiquidGlass className="animate-card" style={{ padding: 24, borderRadius: 12 }}>
-          <div className="font-data" style={{ fontSize: '0.55rem', letterSpacing: '0.12em', color: 'var(--accent-amber)', textTransform: 'uppercase', marginBottom: 18 }}>SHIP & CASE DATA</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+            <div className="font-data" style={{ fontSize: '0.55rem', letterSpacing: '0.12em', color: 'var(--accent-amber)', textTransform: 'uppercase' }}>SHIP & CASE DATA</div>
+            {shipQuery.isFetching && <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--accent-amber)', animation: 'pulse 1.5s infinite' }} />}
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '14px 16px' }}>
-            {FALLBACK_DATA.shipData.map((item, i) => (
+            {shipData.map((item, i) => (
               <div key={i}>
                 <div className="font-data" style={{ fontSize: '0.5rem', color: 'var(--text-dim)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 3 }}>{item.label}</div>
                 <div className="font-data" style={{ fontSize: '0.9rem', color: item.color || 'var(--text-primary)', fontWeight: 600 }}>{item.value}</div>
@@ -133,6 +203,31 @@ export default function DashboardTab() {
         </LiquidGlass>
       </div>
 
+      {/* WHO DON LIVE ALERTS */}
+      {whoAlerts.length > 0 && (
+        <LiquidGlass className="animate-card" style={{ padding: '20px 24px', marginBottom: 16, borderRadius: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+            <div className="font-data" style={{ fontSize: '0.55rem', letterSpacing: '0.12em', color: '#e63946', textTransform: 'uppercase' }}>WHO DISEASE OUTBREAK NEWS</div>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#e63946', animation: 'pulse 1.5s infinite' }} />
+            <span className="font-data" style={{ fontSize: '0.5rem', color: 'var(--text-dim)', marginLeft: 'auto' }}>LIVE · who.int/don</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {whoAlerts.slice(0, 5).map((alert: any, i: number) => (
+              <a key={i} href={alert.link || '#'} target="_blank" rel="noopener noreferrer"
+                style={{ display: 'flex', flexDirection: 'column', gap: 3, textDecoration: 'none', paddingBottom: 10, borderBottom: i < Math.min(whoAlerts.length, 5) - 1 ? '1px solid rgba(245,245,240,0.04)' : 'none' }}>
+                <div style={{ fontSize: '0.78rem', fontWeight: 500, color: 'var(--text-primary)', lineHeight: 1.4 }}>{alert.title}</div>
+                {alert.description && (
+                  <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)', lineHeight: 1.4 }}>{alert.description.slice(0, 140)}{alert.description.length > 140 ? '…' : ''}</div>
+                )}
+                <div className="font-data" style={{ fontSize: '0.5rem', color: 'rgba(143,163,175,0.5)' }}>
+                  {alert.pubDate ? new Date(alert.pubDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
+                </div>
+              </a>
+            ))}
+          </div>
+        </LiquidGlass>
+      )}
+
       {/* AI Analysis + Alert Buttons */}
       <div className="animate-card" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         <button onClick={runAI} disabled={aiLoading}
@@ -151,7 +246,12 @@ export default function DashboardTab() {
 
       {/* LATEST NEWS */}
       <LiquidGlass className="animate-card" style={{ padding: '24px 28px', marginBottom: 16, borderRadius: 12 }}>
-        <div className="font-data" style={{ fontSize: '0.55rem', letterSpacing: '0.12em', color: 'var(--accent-amber)', textTransform: 'uppercase', marginBottom: 16 }}>LATEST NEWS</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <div className="font-data" style={{ fontSize: '0.55rem', letterSpacing: '0.12em', color: 'var(--accent-amber)', textTransform: 'uppercase' }}>LATEST NEWS</div>
+          <span className="font-data" style={{ fontSize: '0.5rem', color: 'var(--text-dim)' }}>
+            {(newsQuery.data as any)?.sources || (newsQuery.isFetching ? 'Fetching...' : 'NewsAPI + GDELT')}
+          </span>
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {articles.map((article: any, i: number) => (
             <a key={i} href={article.url || '#'} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', flexDirection: 'column', gap: 4, textDecoration: 'none', paddingBottom: 12, borderBottom: i < articles.length - 1 ? '1px solid rgba(245,245,240,0.04)' : 'none' }}>

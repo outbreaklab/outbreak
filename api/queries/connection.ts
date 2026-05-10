@@ -1,4 +1,5 @@
 import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2/promise";
 import { env } from "../lib/env";
 import * as schema from "@db/schema";
 import * as relations from "@db/relations";
@@ -26,10 +27,9 @@ export function getDb() {
       console.warn("[DB] DATABASE_URL not set, using mock database");
       return createMockDb();
     }
-    instance = drizzle(env.databaseUrl, {
-      mode: "planetscale",
-      schema: fullSchema,
-    });
+    // Support both PlanetScale (mysql2 URL) and standard Railway MySQL
+    const pool = mysql.createPool(env.databaseUrl);
+    instance = drizzle(pool, { schema: fullSchema, mode: "default" });
   }
   return instance;
 }

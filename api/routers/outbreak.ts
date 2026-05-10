@@ -1,8 +1,31 @@
 import { z } from "zod";
 import { createRouter, publicQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { outbreakCases } from "@db/schema";
+import { outbreakCases, shipTracking } from "@db/schema";
 import { desc } from "drizzle-orm";
+import Anthropic from "@anthropic-ai/sdk";
+
+function parseRSSItems(xml: string) {
+  const items: { title: string; link: string; pubDate: string; description: string }[] = [];
+  for (const match of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const raw = match[1];
+    const extract = (tag: string) =>
+      raw.match(new RegExp(`<${tag}><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`))?.[1] ??
+      raw.match(new RegExp(`<${tag}>([^<]*)<\\/${tag}>`))?.[1] ??
+      "";
+    const link =
+      raw.match(/<link>([^<]+)<\/link>/)?.[1] ??
+      raw.match(/<guid[^>]*>([^<]+)<\/guid>/)?.[1] ??
+      "";
+    items.push({
+      title: extract("title").trim(),
+      link: link.trim(),
+      pubDate: extract("pubDate").trim(),
+      description: extract("description").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300),
+    });
+  }
+  return items;
+}
 
 const ACTIVE_OUTBREAKS = [
   {
@@ -182,34 +205,52 @@ export const outbreakRouter = createRouter({
     };
   }),
 
-  getGlobal: publicQuery.query(async () => {
+  fetchWHO: publicQuery.query(async () => {
     try {
-      // Try WHO RSS/Atom feed (simulated via known endpoints)
-      const whoRes = await fetch("https://www.who.int/emergencies/disease-outbreak-news", {
-        signal: AbortSignal.timeout(8000),
-      });
-      const whoAvailable = whoRes.ok;
-
+      const res = await fetch(
+        "https://www.who.int/feeds/entity/emergencies/disease-outbreak-news/en/rss.xml",
+        { signal: AbortSignal.timeout(10000) }
+      );
+      if (!res.ok) throw new Error(`WHO RSS ${res.status}`);
+      const xml = await res.text();
+      const items = parseRSSItems(xml).slice(0, 20);
+      return { success: true, items, lastUpdated: new Date().toISOString() };
+    } catch (error) {
       return {
-        success: true,
-        outbreaks: ACTIVE_OUTBREAKS,
-        whoAvailable,
-        totalActive: ACTIVE_OUTBREAKS.length,
-        totalCases: ACTIVE_OUTBREAKS.reduce((s, o) => s + (o.casesConfirmed || 0), 0),
-        totalDeaths: ACTIVE_OUTBREAKS.reduce((s, o) => s + (o.deaths || 0), 0),
-        lastUpdated: new Date().toISOString(),
-      };
-    } catch {
-      return {
-        success: true,
-        outbreaks: ACTIVE_OUTBREAKS,
-        whoAvailable: false,
-        totalActive: ACTIVE_OUTBREAKS.length,
-        totalCases: ACTIVE_OUTBREAKS.reduce((s, o) => s + (o.casesConfirmed || 0), 0),
-        totalDeaths: ACTIVE_OUTBREAKS.reduce((s, o) => s + (o.deaths || 0), 0),
+        success: false,
+        error: error instanceof Error ? error.message : "WHO RSS failed",
+        items: [],
         lastUpdated: new Date().toISOString(),
       };
     }
+  }),
+
+  getGlobal: publicQuery.query(async () => {
+    let whoItems: { title: string; link: string; pubDate: string; description: string }[] = [];
+    let whoAvailable = false;
+
+    try {
+      const res = await fetch(
+        "https://www.who.int/feeds/entity/emergencies/disease-outbreak-news/en/rss.xml",
+        { signal: AbortSignal.timeout(10000) }
+      );
+      if (res.ok) {
+        const xml = await res.text();
+        whoItems = parseRSSItems(xml).slice(0, 10);
+        whoAvailable = true;
+      }
+    } catch { /* use hardcoded fallback */ }
+
+    return {
+      success: true,
+      outbreaks: ACTIVE_OUTBREAKS,
+      whoAlerts: whoItems,
+      whoAvailable,
+      totalActive: ACTIVE_OUTBREAKS.length,
+      totalCases: ACTIVE_OUTBREAKS.reduce((s, o) => s + (o.casesConfirmed || 0), 0),
+      totalDeaths: ACTIVE_OUTBREAKS.reduce((s, o) => s + (o.deaths || 0), 0),
+      lastUpdated: new Date().toISOString(),
+    };
   }),
 
   create: publicQuery
@@ -271,5 +312,138 @@ export const outbreakRouter = createRouter({
         error: error instanceof Error ? error.message : "Unknown error",
       };
     }
+  }),
+
+  // Auto-scrape WHO DON + ProMED, send to Claude, save structured data to DB
+  autoExtract: publicQuery.query(async () => {
+    const HANTA_KEYWORDS = ["hantavirus", "hanta", "andv", "andes", "hondius", "hps", "hcps", "pulmonary syndrome"];
+
+    // 1. Fetch WHO DON RSS + ProMED RSS in parallel
+    async function fetchProMEDRaw(): Promise<{ title: string; description: string; link: string; pubDate: string }[]> {
+      try {
+        const res = await fetch("https://promedmail.org/feed/", { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) return [];
+        const xml = await res.text();
+        return parseRSSItems(xml);
+      } catch { return []; }
+    }
+
+    const [whoItems, promedItems] = await Promise.all([
+      (async () => {
+        try {
+          const res = await fetch("https://www.who.int/feeds/entity/emergencies/disease-outbreak-news/en/rss.xml", { signal: AbortSignal.timeout(10000) });
+          if (!res.ok) return [];
+          return parseRSSItems(await res.text());
+        } catch { return []; }
+      })(),
+      fetchProMEDRaw(),
+    ]);
+
+    // 2. Filter for hantavirus-relevant articles
+    const allItems = [...whoItems, ...promedItems];
+    const relevant = allItems.filter((item) => {
+      const text = `${item.title} ${item.description}`.toLowerCase();
+      return HANTA_KEYWORDS.some((k) => text.includes(k));
+    });
+
+    if (relevant.length === 0) {
+      return { success: false, reason: "No hantavirus articles found in feeds", scanned: allItems.length };
+    }
+
+    // 3. Send to Claude Haiku for fast structured extraction
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return { success: false, reason: "ANTHROPIC_API_KEY not set" };
+
+    const anthropic = new Anthropic({ apiKey });
+    const articleText = relevant
+      .slice(0, 8)
+      .map((a) => `[${a.pubDate ? new Date(a.pubDate).toDateString() : "?"}] ${a.title}\n${a.description}`)
+      .join("\n\n---\n\n");
+
+    const extractPrompt = `You are an epidemic intelligence analyst tracking the 2026 MV Hondius Andes hantavirus (ANDV) outbreak.
+
+Extract the LATEST confirmed numbers from these articles. Return ONLY valid JSON, no markdown, no explanation:
+
+{
+  "casesConfirmed": <integer or null>,
+  "casesSuspected": <integer or null>,
+  "deaths": <integer or null>,
+  "shipStatus": <string describing ship status or null>,
+  "peopleOnboard": <integer or null>,
+  "symptomatic": <integer currently showing symptoms or null>,
+  "evacuated": <integer evacuated or null>,
+  "inIcu": <integer in ICU or null>,
+  "newLocations": [<string>],
+  "latestEvent": <one sentence summary of latest development or null>,
+  "confidence": "high" | "medium" | "low",
+  "sourceNames": [<source names>]
+}
+
+Rules: use null for any value not explicitly stated. Do not guess. Only use numbers from the articles.
+
+Articles:
+${articleText}`;
+
+    let extracted: Record<string, any> = {};
+    try {
+      const response = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: extractPrompt }],
+      });
+      const text = response.content[0].type === "text" ? response.content[0].text : "";
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) extracted = JSON.parse(jsonMatch[0]);
+    } catch (err) {
+      return { success: false, reason: "Claude extraction failed", error: String(err) };
+    }
+
+    // 4. Save to DB if meaningful data found
+    const db = getDb();
+    const hasData = extracted.casesConfirmed != null || extracted.deaths != null;
+
+    if (hasData) {
+      const cfr =
+        extracted.casesConfirmed && extracted.deaths
+          ? parseFloat(((extracted.deaths / extracted.casesConfirmed) * 100).toFixed(1))
+          : 0;
+
+      await db.insert(outbreakCases).values({
+        source: (extracted.sourceNames ?? ["WHO/ProMED"]).join(", "),
+        disease: "Andes orthohantavirus (ANDV) / Hantavirus Pulmonary Syndrome",
+        location: "MV Hondius Antarctic cruise ship",
+        country: "International (ship-borne)",
+        casesConfirmed: extracted.casesConfirmed ?? 0,
+        casesSuspected: extracted.casesSuspected ?? 0,
+        deaths: extracted.deaths ?? 0,
+        cfr,
+        riskLevel: "critical",
+        symptoms: "Fever, fatigue, muscle aches, respiratory failure, pulmonary edema",
+        transmission: "Person-to-person (Andes virus unique among hantaviruses)",
+        rawData: extracted as Record<string, unknown>,
+      }).catch(() => { /* ignore duplicate insert errors */ });
+
+      // Update ship tracking if ship data extracted
+      if (extracted.shipStatus || extracted.peopleOnboard != null) {
+        await db.insert(shipTracking).values({
+          vesselName: "MV Hondius",
+          operator: "Oceanwide Expeditions",
+          status: extracted.shipStatus ?? "Status unknown",
+          peopleOnboard: extracted.peopleOnboard ?? null,
+          symptomatic: extracted.symptomatic ?? 0,
+          evacuated: extracted.evacuated ?? 0,
+          inIcu: extracted.inIcu ?? 0,
+          destination: "Tenerife, Canary Islands",
+        }).catch(() => { /* ignore */ });
+      }
+    }
+
+    return {
+      success: true,
+      extracted,
+      articlesScanned: allItems.length,
+      relevantFound: relevant.length,
+      savedToDb: hasData,
+    };
   }),
 });

@@ -13,7 +13,9 @@ export default function NewsTab() {
   const sectionRef = useRef<HTMLDivElement>(null);
 
   const articles = useMemo(() => {
-    const newsArticles = (newsQuery.data?.articles?.length ? newsQuery.data.articles : FALLBACK_DATA.news).map((a: any) => ({ ...a, _source: 'newsapi' as const }));
+    // Backend already merges NewsAPI + WHO DON + ProMED; GDELT adds more live articles
+    const backendArticles = (newsQuery.data?.articles?.length ? newsQuery.data.articles : FALLBACK_DATA.news)
+      .map((a: any) => ({ ...a, _source: (a.source?.name === 'WHO DON' ? 'who' : a.source?.name === 'ProMED' ? 'promed' : 'newsapi') as string }));
     const gdeltArticles = (gdeltQuery.data?.articles?.length ? gdeltQuery.data.articles : []).map((a: any) => ({
       ...a,
       _source: 'gdelt' as const,
@@ -21,12 +23,12 @@ export default function NewsTab() {
       publishedAt: a.date,
       severity: 'medium',
     }));
-    // Merge & dedupe by URL
+    // Dedupe by URL
     const seen = new Set<string>();
-    const merged = [...newsArticles, ...gdeltArticles].filter((a: any) => {
-      const url = a.url || a.link || '';
-      if (!url || seen.has(url)) return false;
-      seen.add(url);
+    const merged = [...backendArticles, ...gdeltArticles].filter((a: any) => {
+      const key = (a.url || a.link || a.title || '').trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
     return merged.slice(0, 24);
@@ -75,7 +77,7 @@ export default function NewsTab() {
             </span>
           )}
           <span className="font-data" style={{ fontSize: '0.55rem', color: 'var(--text-dim)' }}>
-            {gdeltQuery.data?.articles?.length ? `GDELT + NewsAPI` : newsQuery.data?.source === 'fallback' ? 'Fallback Data' : 'NewsAPI'}
+            {(newsQuery.data as any)?.sources || (newsQuery.data?.success === false ? 'Fallback Data' : 'Loading...')}
           </span>
         </div>
       </div>
@@ -92,7 +94,7 @@ export default function NewsTab() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="font-data" style={{ fontSize: '0.55rem', color: 'var(--text-dim)', letterSpacing: '0.08em', fontWeight: 500 }}>
                 {article.source?.name || article.source}
-                {article._source === 'gdelt' && <span style={{ marginLeft: 6, fontSize: '0.5rem', color: 'var(--accent-amber)' }}>● LIVE</span>}
+                {(article._source === 'gdelt' || article._source === 'who' || article._source === 'promed') && <span style={{ marginLeft: 6, fontSize: '0.5rem', color: 'var(--accent-amber)' }}>● LIVE</span>}
               </span>
               <span className="font-data" style={{ fontSize: '0.5rem', color: 'rgba(143,163,175,0.5)' }}>{timeAgo(article.publishedAt || article.date)}</span>
             </div>
