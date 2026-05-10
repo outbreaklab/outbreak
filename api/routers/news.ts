@@ -121,7 +121,7 @@ export const newsRouter = createRouter({
         language: "en",
         sortBy: "publishedAt",
         pageSize: 30,
-        from: new Date(Date.now() - 14 * 86400000).toISOString().split("T")[0],
+        from: new Date(Date.now() - 30 * 86400000).toISOString().split("T")[0],
       });
       newsApiArticles = (response.articles || []).map((a: any) => {
         const titleLower = (a.title || "").toLowerCase();

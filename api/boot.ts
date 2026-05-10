@@ -34,20 +34,33 @@ if (env.isProduction) {
 
 // Cron jobs: auto-sync news + AI hantavirus extraction
 function startCronJobs() {
-  const TEN_MINUTES = 10 * 60 * 1000;
+  const TEN_MINUTES   = 10 * 60 * 1000;
+  const SIX_HOURS     = 6 * 60 * 60 * 1000;  // NewsAPI: max ~4 req/day (free plan = 100/day)
   const THIRTY_MINUTES = 30 * 60 * 1000;
 
-  // News sync every 10 minutes
+  // Free sources (WHO DON RSS + ProMED) — no rate limit, run every 10 min
   setInterval(async () => {
     try {
-      console.log("[CRON] Syncing news (WHO DON + ProMED + NewsAPI)...");
+      console.log("[CRON] Syncing WHO DON + ProMED (free sources)...");
       const caller = appRouter.createCaller({} as any);
-      const result = await caller.news.fetchLatest();
-      console.log(`[CRON] News synced — ${(result as any).count ?? 0} articles (${(result as any).sources ?? 'unknown'})`);
+      const result = await caller.outbreak.getGlobal();
+      console.log(`[CRON] WHO DON synced — ${(result as any).whoAlerts?.length ?? 0} alerts, whoAvailable=${(result as any).whoAvailable}`);
     } catch (err) {
-      console.error("[CRON] News sync failed:", err);
+      console.error("[CRON] WHO DON sync failed:", err);
     }
   }, TEN_MINUTES);
+
+  // NewsAPI — rate-limited: 100 req/day on free plan → run every 6 hours (4 req/day)
+  setInterval(async () => {
+    try {
+      console.log("[CRON] Syncing NewsAPI (rate-limited, 6h interval)...");
+      const caller = appRouter.createCaller({} as any);
+      const result = await caller.news.fetchLatest();
+      console.log(`[CRON] NewsAPI synced — ${(result as any).count ?? 0} articles (${(result as any).sources ?? 'unknown'})`);
+    } catch (err) {
+      console.error("[CRON] NewsAPI sync failed:", err);
+    }
+  }, SIX_HOURS);
 
   // AI hantavirus extraction every 30 minutes
   setInterval(async () => {
@@ -69,15 +82,15 @@ function startCronJobs() {
     }
   }, THIRTY_MINUTES);
 
-  // Initial sync on startup (stagger: news at 5s, AI extraction at 15s)
+  // Initial syncs on startup — staggered to avoid hammering APIs at once
   setTimeout(async () => {
     try {
-      console.log("[INIT] Initial news sync...");
+      console.log("[INIT] Initial NewsAPI sync...");
       const caller = appRouter.createCaller({} as any);
-      await caller.news.fetchLatest();
-      console.log("[INIT] Initial news sync complete");
+      const result = await caller.news.fetchLatest();
+      console.log(`[INIT] NewsAPI sync complete — sources: ${(result as any).sources}`);
     } catch (err) {
-      console.error("[INIT] Initial news sync failed:", err);
+      console.error("[INIT] NewsAPI sync failed:", err);
     }
   }, 5000);
 
@@ -92,7 +105,7 @@ function startCronJobs() {
     }
   }, 15000);
 
-  console.log("[CRON] Scheduled jobs started — news: 10min, AI extraction: 30min");
+  console.log("[CRON] Scheduled jobs started — WHO/ProMED: 10min, NewsAPI: 6h, AI extraction: 30min");
 }
 
 startCronJobs();
